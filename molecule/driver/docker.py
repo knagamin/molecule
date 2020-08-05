@@ -218,28 +218,36 @@ class Docker(Driver):
 
     def ansible_connection_options(self, instance_name):
         x = {"ansible_connection": "docker"}
-        if "DOCKER_HOST" in os.environ:
-            x["ansible_docker_extra_args"] = "-H={}".format(os.environ["DOCKER_HOST"])
+        host = self._get_docker_host(instance_name)
+
+        x["ansible_docker_extra_args"] = "-H={}".format(host)
         return x
 
     @lru_cache()
     def sanity_checks(self):
         """Implement Docker driver sanity checks."""
         log.info("Sanity checks: '{}'".format(self._name))
+        _environ = dict(os.environ)
 
-        try:
-            import docker
-            import requests
+        for docker_host in self._get_unique_docker_hosts():
+            os.environ["DOCKER_HOST"] = docker_host
 
-            docker_client = docker.from_env()
-            docker_client.ping()
-        except requests.exceptions.ConnectionError:
-            msg = (
-                "Unable to contact the Docker daemon. "
-                "Please refer to https://docs.docker.com/config/daemon/ "
-                "for managing the daemon"
-            )
-            sysexit_with_message(msg)
+            try:
+                import docker
+                import requests
+
+                docker_client = docker.from_env()
+                docker_client.ping()
+            except requests.exceptions.ConnectionError:
+                msg = (
+                    "Unable to contact the Docker daemon: '{}'. "
+                    "Please refer to https://docs.docker.com/config/daemon/ "
+                    "for managing the daemon".format(docker_host)
+                )
+                sysexit_with_message(msg)
+            finally:
+                os.environ.clear()
+                os.environ.update(_environ)
 
     def reset(self):
         import docker
@@ -254,3 +262,25 @@ class Docker(Driver):
         for n in client.networks.list(filters={"label": "owner=molecule"}):
             log.info("Removing docker network %s ...." % n.name)
             n.remove()
+
+    def _get_instance(self, instance_name):
+        return next(
+                instance for instance in self._config.platforms.instances
+                if instance["name"] == instance_name
+                )
+
+    def _get_docker_host(self, instance_name):
+        default_host = os.environ.get("DOCKER_HOST", "unix://var/run/docker.sock")
+        instance = self._get_instance(instance_name)
+
+        if "docker_host" in instance:
+            return instance['docker_host']
+        else:
+            return default_host
+
+    def _get_unique_docker_hosts(self):
+        unique_hosts = set()
+        for instance in self._config.platforms.instances:
+            unique_hosts.add(self._get_docker_host(instance['name']))
+
+        return list(unique_hosts)
